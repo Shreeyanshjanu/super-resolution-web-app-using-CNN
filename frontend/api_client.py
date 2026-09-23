@@ -1,104 +1,50 @@
 from __future__ import annotations
-
-import time
-from typing import Any
-
+import os
 import requests
 
 
 class SRMApiClient:
-    def __init__(
-        self,
-        base_url: str = "http://127.0.0.1:8000",
-    ) -> None:
-        self.base_url = base_url.rstrip("/")
+    def __init__(self, base_url=None):
+        self.base_url = (base_url or os.environ.get("SRM_API_URL", "http://127.0.0.1:8000")).rstrip("/")
 
-    def health(self) -> dict[str, Any]:
-        response = requests.get(
-            f"{self.base_url}/api/health",
-            timeout=10,
-        )
+    def _request(self, method, path, **kwargs):
+        response = requests.request(method, self.base_url + path, timeout=kwargs.pop("timeout", 30), **kwargs)
+        if not response.ok:
+            try:
+                detail = response.json().get("detail", response.text)
+            except ValueError:
+                detail = response.text
+            raise RuntimeError(f"API {response.status_code}: {detail}")
+        return response
 
-        response.raise_for_status()
+    def health(self):
+        return self._request("GET", "/api/health", timeout=5).json()
 
-        return response.json()
+    def upload_scene(self, file_bytes, filename, band_order="auto", value_scale=10000):
+        return self._request("POST", "/api/scenes", files={"file": (filename, file_bytes, "image/tiff")},
+                             data={"band_order": band_order, "value_scale": value_scale}, timeout=300).json()
 
-    def submit_file(
-        self,
-        file_bytes: bytes,
-        filename: str,
-    ) -> dict[str, Any]:
+    def preview(self, scene_id):
+        return self._request("GET", f"/api/scenes/{scene_id}/preview").content
 
-        files = {
-            "file": (
-                filename,
-                file_bytes,
-                "image/tiff",
-            )
-        }
+    def plan(self, scene_id, aoi):
+        return self._request("POST", f"/api/scenes/{scene_id}/plan", json=aoi).json()
 
-        response = requests.post(
-            f"{self.base_url}/api/super-resolve",
-            files=files,
-            timeout=30,
-        )
+    def submit_aoi(self, scene_id, aoi, sampling_steps=100):
+        return self._request("POST", "/api/super-resolve",
+                             json={"scene_id": scene_id, "aoi": aoi, "sampling_steps": sampling_steps}).json()
 
-        response.raise_for_status()
+    def get_job(self, job_id):
+        return self._request("GET", f"/api/jobs/{job_id}").json()
 
-        return response.json()
+    def list_jobs(self):
+        return self._request("GET", "/api/jobs").json()
 
-    def get_job(
-        self,
-        job_id: str,
-    ) -> dict[str, Any]:
+    def download_result(self, job_id, product="sr"):
+        return self._request("GET", f"/api/jobs/{job_id}/download", params={"product": product}, timeout=300).content
 
-        response = requests.get(
-            f"{self.base_url}/api/jobs/{job_id}",
-            timeout=10,
-        )
+    def delete_job(self, job_id):
+        return self._request("DELETE", f"/api/jobs/{job_id}").json()
 
-        response.raise_for_status()
-
-        return response.json()
-
-    def wait_for_job(
-        self,
-        job_id: str,
-        poll_interval: float = 2.0,
-        timeout: float = 3600,
-    ) -> dict[str, Any]:
-
-        start = time.monotonic()
-
-        while True:
-
-            job = self.get_job(job_id)
-
-            status = job.get("status")
-
-            if status in {
-                "completed",
-                "failed",
-            }:
-                return job
-
-            if time.monotonic() - start > timeout:
-                raise TimeoutError(
-                    "Timed out waiting for SR job."
-                )
-
-            time.sleep(poll_interval)
-
-    def download_result(
-        self,
-        job_id: str,
-    ) -> bytes:
-
-        response = requests.get(
-            f"{self.base_url}/api/jobs/{job_id}/download",
-            timeout=300,
-        )
-
-        response.raise_for_status()
-
-        return response.content
+    def delete_scene(self, scene_id):
+        return self._request("DELETE", f"/api/scenes/{scene_id}").json()

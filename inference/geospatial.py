@@ -10,6 +10,9 @@ def super_resolve(
     model,
     device: str,
     debug: bool = False,
+    max_patches: int = 4,
+    expected_patches: int | None = None,
+    progress_callback=None,
 ) -> Path:
     """
     Run the already-loaded ESA LDSR-S2 model on a
@@ -30,6 +33,17 @@ def super_resolve(
         raise ValueError(
             "device must be 'cpu' or 'cuda'"
         )
+
+    if model is None:
+        raise ValueError("A loaded ESA LDSR-S2 model is required.")
+    import rasterio
+    from inference.aoi import patch_count
+    with rasterio.open(input_path) as src:
+        patches = patch_count(src.width, src.height)
+        if min(src.width, src.height) < 128:
+            raise ValueError("Pad the selected crop to at least 128×128 before inference.")
+        if patches > max_patches:
+            raise ValueError(f"This crop needs {patches} patches; limit: {max_patches}.")
 
     print("=" * 60)
     print("SENTINEL-2 SUPER RESOLUTION")
@@ -74,6 +88,19 @@ def super_resolve(
     )
 
     print("Starting SR inference...")
+
+    actual = len(job.image_meta["image_windows"])
+    if actual > max_patches or (expected_patches is not None and actual != expected_patches):
+        raise RuntimeError(f"Unexpected patch count: {actual}. Refusing unplanned inference.")
+    if progress_callback:
+        original_step = job.model.predict_step
+        def predict_step(*args, **kwargs):
+            result = original_step(*args, **kwargs)
+            predict_step.completed += 1
+            progress_callback(predict_step.completed, actual)
+            return result
+        predict_step.completed = 0
+        job.model.predict_step = predict_step
 
     output_path = job.run()
 

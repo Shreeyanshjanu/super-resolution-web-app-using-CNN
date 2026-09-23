@@ -1,0 +1,25 @@
+# Direct runtime dependencies; constraints pin the tested Windows/Python 3.13 environment.
+-c requirements-lock.txt
+fastapi
+uvicorn
+python-multipart
+filelock
+pydantic
+streamlit
+streamlit-folium
+folium
+pyproj
+rasterio
+affine
+numpy
+Pillow
+requests
+torch
+torchvision
+pytorch-lightning
+opensr-model
+opensr-utils
+omegaconf
+scikit-image
+scipy
+matplotlib

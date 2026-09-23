@@ -1,849 +1,241 @@
 from __future__ import annotations
-
+import hashlib
 import time
 
 import streamlit as st
 
 from frontend.api_client import SRMApiClient
 from frontend.components.comparison import before_after_slider
-from frontend.components.map_view import show_map
-from frontend.components.results import (
-    geotiff_to_rgb,
-    get_geotiff_metadata,
-)
+from frontend.components.map_view import select_aoi, show_result_map
+from frontend.components.results import comparison_images, detail_images, get_geotiff_metadata, map_preview
 
+st.set_page_config(page_title="Satellite SRM", page_icon="🛰️", layout="wide")
+st.title("Satellite super-resolution")
+st.write("Select a small area of Sentinel-2 imagery and generate a 4× super-resolved estimate with ESA LDSR-S2.")
 
-# ============================================================
-# CONFIGURATION
-# ============================================================
-
-API_URL = "http://127.0.0.1:8000"
-
-
-# ============================================================
-# PAGE CONFIGURATION
-# ============================================================
-
-st.set_page_config(
-    page_title="Satellite SRM",
-    page_icon="🛰️",
-    layout="wide",
-    initial_sidebar_state="expanded",
-)
-
-
-# ============================================================
-# CUSTOM CSS
-# ============================================================
-
-st.markdown(
-    """
-    <style>
-
-    .main-title {
-        font-size: 3rem;
-        font-weight: 700;
-        margin-bottom: 0.2rem;
-    }
-
-    .subtitle {
-        font-size: 1.15rem;
-        color: #9ca3af;
-        margin-bottom: 1.5rem;
-    }
-
-    .section-title {
-        font-size: 1.5rem;
-        font-weight: 600;
-        margin-top: 1rem;
-        margin-bottom: 1rem;
-    }
-
-    </style>
-    """,
-    unsafe_allow_html=True,
-)
-
-
-# ============================================================
-# API CLIENT
-# ============================================================
-
-@st.cache_resource
-def get_api_client() -> SRMApiClient:
-    return SRMApiClient(
-        base_url=API_URL
-    )
-
-
-api = get_api_client()
-
-
-# ============================================================
-# SESSION STATE
-# ============================================================
-
-if "job_id" not in st.session_state:
-    st.session_state.job_id = None
-
-if "completed_job" not in st.session_state:
-    st.session_state.completed_job = None
-
-if "output_bytes" not in st.session_state:
-    st.session_state.output_bytes = None
-
-if "uploaded_filename" not in st.session_state:
-    st.session_state.uploaded_filename = None
-
-if "uploaded_bytes" not in st.session_state:
-    st.session_state.uploaded_bytes = None
-
-
-# ============================================================
-# HEADER
-# ============================================================
-
-st.markdown(
-    '<div class="main-title">🛰️ Satellite Super Resolution Mapping</div>',
-    unsafe_allow_html=True,
-)
-
-st.markdown(
-    """
-    <div class="subtitle">
-        Deep Learning-Based Super Resolution for Sentinel-2 Imagery
-    </div>
-    """,
-    unsafe_allow_html=True,
-)
-
-st.write(
-    "Transform 10 m Sentinel-2 RGB-NIR imagery into a "
-    "2.5 m super-resolved estimate using the pretrained "
-    "ESA LDSR-S2 model."
-)
-
-
-# ============================================================
-# BACKEND CHECK
-# ============================================================
-
+api = SRMApiClient()
 try:
-
-    health = api.health()
-
-    if health.get("status") != "ok":
-
-        st.error(
-            "FastAPI is running, but the SRM service is not healthy."
-        )
-
-        st.stop()
-
-    model_info = health["model"]
-
+    info = api.health()["model"]
 except Exception as exc:
-
-    st.error(
-        "❌ Could not connect to the FastAPI backend."
-    )
-
-    st.code(
-        str(exc)
-    )
-
-    st.info(
-        "Start FastAPI with:\n\n"
-        "python -m uvicorn backend.main:app --reload"
-    )
-
+    st.error(f"The backend is unavailable or still loading the model. {exc}")
+    st.code("python -m uvicorn backend.main:app --workers 1")
     st.stop()
 
-
-# ============================================================
-# MODEL INFORMATION
-# ============================================================
-
-st.markdown(
-    '<div class="section-title">Model Information</div>',
-    unsafe_allow_html=True,
-)
-
-col1, col2, col3, col4 = st.columns(4)
-
-with col1:
-    st.metric(
-        "Model",
-        model_info.get(
-            "model",
-            "ESA LDSR-S2",
-        ),
-    )
-
-with col2:
-    st.metric(
-        "Input",
-        f"{model_info.get('input_resolution_m', 10)} m",
-    )
-
-with col3:
-    st.metric(
-        "Output",
-        f"{model_info.get('output_resolution_m', 2.5)} m",
-    )
-
-with col4:
-    st.metric(
-        "Scale",
-        f"{model_info.get('scale_factor', 4)}×",
-    )
-
-
-st.divider()
-
-
-# ============================================================
-# SIDEBAR
-# ============================================================
-
 with st.sidebar:
+    st.header("Processing")
+    st.write(f"**Model:** {info['model']}")
+    st.write(f"**Device:** {info['device']}")
+    quality_labels = {100: "Detailed — 100 steps", 50: "Balanced — 50 steps", 20: "Quick preview — 20 steps"}
+    sampling_options = sorted(info.get("sampling_options", [20]), reverse=True)
+    if "sampling_options" in info and not st.session_state.get("quality_settings_version"):
+        st.session_state.sampling_steps = info["sampling_steps"]
+        st.session_state.quality_settings_version = 1
+    sampling_steps = st.selectbox("Reconstruction quality", sampling_options,
+                                 format_func=lambda value: quality_labels[value], key="sampling_steps")
+    if "sampling_options" not in info:
+        st.warning("Restart the FastAPI server to enable the new quality settings.")
+    st.write(f"**Maximum patches per AOI:** {info['max_patches']}")
+    st.caption("100 steps uses five times as many denoising iterations as the old 20-step preview. Allow several minutes per patch; reconstruction quality varies with the scene.")
+    with st.expander("Saved jobs"):
+        if st.button("Refresh job history"):
+            st.session_state.history = api.list_jobs()
+        history = st.session_state.get("history", [])
+        if history:
+            selected = st.selectbox("Job", [job["job_id"] for job in history],
+                                    format_func=lambda value: next(f"{j['filename']} · {j['status']} · {value[:8]}" for j in history if j["job_id"] == value))
+            if st.button("Open job"):
+                st.session_state.active_job = selected
+                st.session_state.poll_started = time.monotonic()
+                st.session_state.poll_enabled = True
+                st.session_state.pop("products", None)
+            if st.button("Delete finished job"):
+                try:
+                    api.delete_job(selected)
+                    st.session_state.history = api.list_jobs()
+                    if st.session_state.get("active_job") == selected:
+                        st.session_state.pop("active_job", None)
+                        st.session_state.pop("products", None)
+                    st.rerun()
+                except Exception as exc:
+                    st.error(str(exc))
 
-    st.header("⚙️ System")
+st.subheader("1. Upload and inspect")
+uploaded = st.file_uploader("Four-band Sentinel-2 L2A TIFF", type=["tif", "tiff"])
+order_labels = {"auto": "Read band descriptions", "rgbn": "RGBN — B04, B03, B02, B08", "bgrn": "BGRN — B02, B03, B04, B08"}
+order = st.selectbox("Input band order", list(order_labels), format_func=order_labels.get)
+scale = st.selectbox("Reflectance storage", [10000, 1],
+                     format_func=lambda x: "Reflectance × 10,000" if x == 10000 else "Reflectance in [0, 1]")
+st.caption("For the unlabelled SEN2NAIP demo, choose RGBN. Labelled prepared files can use their band descriptions.")
 
-    st.write(
-        f"**Backend:** `{API_URL}`"
-    )
+fingerprint = None
+if uploaded is not None:
+    fingerprint = hashlib.sha256(uploaded.getbuffer()).hexdigest() + f":{order}:{scale}"
+if st.session_state.get("upload_fingerprint") != fingerprint:
+    # Contents and interpretation determine identity, even for identical filenames.
+    for key in ("scene", "scene_preview", "active_job", "products", "poll_started"):
+        st.session_state.pop(key, None)
+    st.session_state.upload_fingerprint = fingerprint
+    st.session_state.poll_enabled = False
 
-    st.write(
-        f"**Device:** "
-        f"`{model_info.get('device', 'unknown')}`"
-    )
-
-    st.write(
-        "**Input:** Sentinel-2 L2A"
-    )
-
-    st.write(
-        "**Bands:** B02, B03, B04, B08"
-    )
-
-    st.write(
-        "**Target:** 2.5 m"
-    )
-
-    st.divider()
-
-    st.info(
-        "Current model: ESA LDSR-S2 pretrained model."
-    )
-
-
-# ============================================================
-# UPLOAD
-# ============================================================
-
-st.markdown(
-    '<div class="section-title">1. Upload Sentinel-2 GeoTIFF</div>',
-    unsafe_allow_html=True,
-)
-
-uploaded_file = st.file_uploader(
-    "Upload a 4-band Sentinel-2 L2A GeoTIFF",
-    type=[
-        "tif",
-        "tiff",
-    ],
-    help=(
-        "Expected bands: B02, B03, B04 and B08 "
-        "at 10 m resolution."
-    ),
-)
-
-
-# ============================================================
-# FILE HANDLING
-# ============================================================
-
-if uploaded_file is not None:
-
-    file_bytes = uploaded_file.getvalue()
-
-
-    # --------------------------------------------------------
-    # Detect new upload
-    # --------------------------------------------------------
-
-    if (
-        st.session_state.uploaded_filename
-        != uploaded_file.name
-    ):
-
-        st.session_state.job_id = None
-        st.session_state.completed_job = None
-        st.session_state.output_bytes = None
-        st.session_state.uploaded_filename = (
-            uploaded_file.name
-        )
-
-    st.session_state.uploaded_bytes = file_bytes
-
-
-    st.success(
-        f"✅ Loaded: {uploaded_file.name}"
-    )
-
-
-    file_size_mb = (
-        len(file_bytes)
-        / (1024 * 1024)
-    )
-
-    st.write(
-        f"File size: **{file_size_mb:.2f} MB**"
-    )
-
-
-    # ========================================================
-    # INPUT PREVIEW
-    # ========================================================
-
+if uploaded is not None and st.button("Inspect image", type="primary"):
     try:
-
-        original_image = geotiff_to_rgb(
-            file_bytes
-        )
-
-        st.subheader(
-            "Input Preview"
-        )
-
-        st.image(
-            original_image,
-            caption="Sentinel-2 Input — 10 m",
-            use_container_width=True,
-        )
-
+        with st.spinner("Uploading and preparing a map preview…"):
+            scene = api.upload_scene(uploaded.getvalue(), uploaded.name, order, scale)
+            preview = api.preview(scene["scene_id"])
+        st.session_state.scene = scene
+        st.session_state.scene_preview = preview
     except Exception as exc:
+        st.error(str(exc))
 
-        original_image = None
+scene = st.session_state.get("scene")
+if scene:
+    for warning in scene["warnings"]:
+        st.warning(warning)
+    st.caption(f"{scene['width']} × {scene['height']} pixels · Full image: {scene['full_image_patches']} patches · Output bands: RGB + NIR")
+    st.subheader("2. Select the area to process")
+    modes = ["Center crop (up to 128×128)", "Pixel rectangle"]
+    if scene["crs"]:
+        modes.append("Draw on map")
+    mode = st.radio("Area selection", modes, horizontal=True, key=f"mode-{scene['scene_id']}")
+    aoi = {"mode": "center"}
+    if mode == "Pixel rectangle":
+        cols = st.columns(4)
+        x = cols[0].number_input("Left column", min_value=0, max_value=scene["width"] - 1, value=0, step=1, key=f"x-{scene['scene_id']}")
+        y = cols[1].number_input("Top row", min_value=0, max_value=scene["height"] - 1, value=0, step=1, key=f"y-{scene['scene_id']}")
+        width = cols[2].number_input("Width (pixels)", min_value=1, max_value=scene["width"] - x, value=min(128, scene["width"] - x), step=1)
+        height = cols[3].number_input("Height (pixels)", min_value=1, max_value=scene["height"] - y, value=min(128, scene["height"] - y), step=1)
+        aoi = {"mode": "pixel", "x": x, "y": y, "width": width, "height": height}
+    if scene["crs"]:
+        default_plan = None
+        if mode != "Draw on map":
+            try:
+                default_plan = api.plan(scene["scene_id"], aoi)
+            except Exception:
+                pass
+        bbox = select_aoi(scene, st.session_state.scene_preview, draw=mode == "Draw on map",
+                          selection_bounds=default_plan["bounds_wgs84"] if default_plan else None)
+        if mode == "Draw on map":
+            st.caption("Use the rectangle tool. The most recently drawn rectangle is selected; edit or delete it on the map. The crop snaps outward to source pixels.")
+            aoi = {"mode": "bbox", "bbox": bbox} if bbox else None
+    else:
+        st.image(st.session_state.scene_preview, caption="Source preview — pixel coordinates only", width=650)
 
-        st.warning(
-            "Could not generate an RGB preview."
-        )
-
-        st.code(
-            str(exc)
-        )
-
-
-    st.divider()
-
-
-    # ========================================================
-    # RUN BUTTON
-    # ========================================================
-
-    if st.button(
-        "🚀 Run Super Resolution",
-        type="primary",
-        use_container_width=True,
-    ):
-
-        st.session_state.job_id = None
-        st.session_state.completed_job = None
-        st.session_state.output_bytes = None
-
-
+    plan = None
+    if aoi:
         try:
-
-            # ------------------------------------------------
-            # Upload
-            # ------------------------------------------------
-
-            with st.spinner(
-                "Uploading Sentinel-2 image..."
-            ):
-
-                response = api.submit_file(
-                    file_bytes=file_bytes,
-                    filename=uploaded_file.name,
-                )
-
-
-            job_id = response["job_id"]
-
-            st.session_state.job_id = job_id
-
-
-            # ------------------------------------------------
-            # Processing
-            # ------------------------------------------------
-
-            st.subheader(
-                "Processing"
-            )
-
-            progress_bar = st.progress(
-                5
-            )
-
-            status_text = st.empty()
-
-
-            while True:
-
-                job = api.get_job(
-                    job_id
-                )
-
-                status = job.get(
-                    "status",
-                    "unknown",
-                )
-
-
-                if status == "queued":
-
-                    progress_bar.progress(
-                        5
-                    )
-
-                    status_text.info(
-                        "⏳ Job queued..."
-                    )
-
-
-                elif status == "processing":
-
-                    progress_bar.progress(
-                        10
-                    )
-
-                    status_text.info(
-                        "🔄 Generating the 2.5 m "
-                        "super-resolved product..."
-                    )
-
-
-                elif status == "completed":
-
-                    progress_bar.progress(
-                        100
-                    )
-
-                    status_text.success(
-                        "✅ Super resolution completed."
-                    )
-
-                    st.session_state.completed_job = job
-
-                    break
-
-
-                elif status == "failed":
-
-                    progress_bar.progress(
-                        100
-                    )
-
-                    status_text.error(
-                        "❌ Super-resolution failed."
-                    )
-
-                    st.error(
-                        job.get(
-                            "error",
-                            "Unknown error.",
-                        )
-                    )
-
-                    break
-
-
-                else:
-
-                    status_text.warning(
-                        f"Unexpected status: {status}"
-                    )
-
-
-                time.sleep(2)
-
-
+            plan = api.plan(scene["scene_id"], aoi)
+            a, b, c = st.columns(3)
+            w = plan["window"]
+            a.metric("Selected pixels", f"{w['width']} × {w['height']}")
+            b.metric("Model patches", plan["patches"])
+            c.metric("Output pixels", f"{plan['output_width']} × {plan['output_height']}")
+            st.caption(f"Pixel window: column {w['x']}, row {w['y']}. {plan['full_image_patches']} full-image patches → {plan['patches']} AOI patches.")
+            if plan["padding_right"] or plan["padding_bottom"]:
+                st.caption("Small crops are padded to 128×128 for the model. Padding is removed from the final product.")
         except Exception as exc:
+            st.error(str(exc))
+    else:
+        st.info("Draw a small rectangle to preview its patch count.")
 
-            st.error(
-                "❌ Super-resolution request failed."
-            )
-
-            st.exception(
-                exc
-            )
-
-
-# ============================================================
-# RESULT
-# ============================================================
-
-job = st.session_state.get(
-    "completed_job"
-)
-
-
-if job is not None:
-
-    st.divider()
-
-    st.markdown(
-        '<div class="section-title">2. Super-Resolution Result</div>',
-        unsafe_allow_html=True,
-    )
-
-
-    try:
-
-        # ====================================================
-        # DOWNLOAD SR PRODUCT
-        # ====================================================
-
-        if (
-            st.session_state.output_bytes
-            is None
-        ):
-
-            with st.spinner(
-                "Downloading SR GeoTIFF..."
-            ):
-
-                output_bytes = (
-                    api.download_result(
-                        job["job_id"]
-                    )
-                )
-
-            st.session_state.output_bytes = (
-                output_bytes
-            )
-
-        else:
-
-            output_bytes = (
-                st.session_state.output_bytes
-            )
-
-
-        # ====================================================
-        # LOAD INPUT AND OUTPUT
-        # ====================================================
-
-        input_bytes = (
-            st.session_state.uploaded_bytes
-        )
-
-        if input_bytes is None:
-
-            raise RuntimeError(
-                "Original uploaded image is no longer available."
-            )
-
-
-        original_image = geotiff_to_rgb(
-            input_bytes
-        )
-
-        sr_image = geotiff_to_rgb(
-            output_bytes
-        )
-
-
-        # ====================================================
-        # BEFORE / AFTER
-        # ====================================================
-
-        st.subheader(
-            "Before / After Comparison"
-        )
-
-        st.caption(
-            "Drag the slider left and right to compare "
-            "the original 10 m image with the "
-            "2.5 m super-resolved estimate."
-        )
-
-        before_after_slider(
-            before=original_image,
-            after=sr_image,
-            before_label="Original — 10 m",
-            after_label="ESA LDSR-S2 — 2.5 m",
-        )
-
-
-        # ====================================================
-        # PRODUCT INFORMATION
-        # ====================================================
-
-        st.subheader(
-            "Product Information"
-        )
-
-        input_metadata = get_geotiff_metadata(
-            input_bytes
-        )
-
-        output_metadata = get_geotiff_metadata(
-            output_bytes
-        )
-
-
-        m1, m2, m3, m4 = st.columns(4)
-
-        with m1:
-
-            st.metric(
-                "Input Resolution",
-                f"{input_metadata['resolution_x']:.1f} m",
-            )
-
-        with m2:
-
-            st.metric(
-                "Output Resolution",
-                f"{output_metadata['resolution_x']:.1f} m",
-            )
-
-        with m3:
-
-            st.metric(
-                "Scale Factor",
-                "4×",
-            )
-
-        with m4:
-
-            st.metric(
-                "Bands",
-                str(output_metadata["bands"]),
-            )
-
-
-        # ====================================================
-        # GEOGRAPHIC MAP
-        # ====================================================
-
-        st.subheader(
-            "3. Geographic View"
-        )
-
-        st.caption(
-            "The super-resolved product is displayed at its "
-            "actual geographic location using the GeoTIFF "
-            "coordinate reference system and bounds."
-        )
-
+    if st.button("Super-resolve selected area", disabled=plan is None or "sampling_options" not in info, type="primary"):
         try:
-
-            map_data = show_map(
-                metadata=output_metadata,
-                rgb_image=sr_image,
-                layer_name="ESA LDSR-S2 — 2.5 m",
-                height=600,
-            )
-
-            if map_data:
-
-                clicked = map_data.get(
-                    "last_clicked"
-                )
-
-                if clicked:
-
-                    st.caption(
-                        f"Clicked location: "
-                        f"{clicked['lat']:.6f}, "
-                        f"{clicked['lng']:.6f}"
-                    )
-
-        except Exception as map_exc:
-
-            st.warning(
-                "Could not display the geographic map."
-            )
-
-            st.code(
-                str(map_exc)
-            )
+            job = api.submit_aoi(scene["scene_id"], aoi, sampling_steps=sampling_steps)
+            st.session_state.active_job = job["job_id"]
+            st.session_state.poll_started = time.monotonic()
+            st.session_state.poll_enabled = True
+            st.session_state.pop("products", None)
+        except Exception as exc:
+            st.error(str(exc))
+    with st.expander("Source details"):
+        st.json(scene)
+        if st.button("Delete uploaded source"):
+            try:
+                api.delete_scene(scene["scene_id"])
+                st.session_state.pop("scene", None)
+                st.session_state.pop("scene_preview", None)
+                st.rerun()
+            except Exception as exc:
+                st.error(str(exc))
 
 
-        # ====================================================
-        # DETAILED METADATA
-        # ====================================================
-
-        with st.expander(
-            "🔍 Detailed GeoTIFF Metadata"
-        ):
-
-            metadata_col1, metadata_col2 = (
-                st.columns(2)
-            )
-
-
-            with metadata_col1:
-
-                st.markdown(
-                    "**Input Product**"
-                )
-
-                st.write(
-                    f"Dimensions: "
-                    f"{input_metadata['width']} × "
-                    f"{input_metadata['height']}"
-                )
-
-                st.write(
-                    f"Resolution: "
-                    f"{input_metadata['resolution_x']:.2f} × "
-                    f"{input_metadata['resolution_y']:.2f} m"
-                )
-
-                st.write(
-                    f"Bands: "
-                    f"{input_metadata['bands']}"
-                )
-
-                st.write(
-                    f"CRS: "
-                    f"{input_metadata['crs']}"
-                )
-
-                st.write(
-                    f"Data type: "
-                    f"{input_metadata['dtype']}"
-                )
-
-
-            with metadata_col2:
-
-                st.markdown(
-                    "**SR Product**"
-                )
-
-                st.write(
-                    f"Dimensions: "
-                    f"{output_metadata['width']} × "
-                    f"{output_metadata['height']}"
-                )
-
-                st.write(
-                    f"Resolution: "
-                    f"{output_metadata['resolution_x']:.2f} × "
-                    f"{output_metadata['resolution_y']:.2f} m"
-                )
-
-                st.write(
-                    f"Bands: "
-                    f"{output_metadata['bands']}"
-                )
-
-                st.write(
-                    f"CRS: "
-                    f"{output_metadata['crs']}"
-                )
-
-                st.write(
-                    f"Data type: "
-                    f"{output_metadata['dtype']}"
-                )
-
-
-        # ====================================================
-        # SCIENTIFIC NOTE
-        # ====================================================
-
-        st.info(
-            "The 2.5 m product is a learned super-resolution "
-            "estimate generated from 10 m Sentinel-2 "
-            "RGB-NIR imagery. It should not be interpreted "
-            "as native 2.5 m satellite observation."
-        )
-
-
-        # ====================================================
-        # PROCESSING DETAILS
-        # ====================================================
-
-        with st.expander(
-            "⚙️ Processing Details"
-        ):
-
-            st.write(
-                f"**Job ID:** "
-                f"`{job.get('job_id', 'N/A')}`"
-            )
-
-            st.write(
-                f"**Status:** "
-                f"`{job.get('status', 'N/A')}`"
-            )
-
-            st.write(
-                f"**Input file:** "
-                f"`{job.get('filename', 'N/A')}`"
-            )
-
-            st.write(
-                f"**Device:** "
-                f"`{model_info.get('device', 'N/A')}`"
-            )
-
-            st.write(
-                "**Model:** ESA LDSR-S2"
-            )
-
-            st.write(
-                "**Bands:** B02, B03, B04, B08"
-            )
-
-
-        # ====================================================
-        # DOWNLOAD
-        # ====================================================
-
-        st.subheader(
-            "Download"
-        )
-
-        output_filename = (
-            f"{job['job_id']}_sr_2.5m.tif"
-        )
-
-        st.download_button(
-            label="⬇️ Download 2.5 m GeoTIFF",
-            data=output_bytes,
-            file_name=output_filename,
-            mime="image/tiff",
-            type="primary",
-            use_container_width=True,
-        )
-
-
+@st.fragment(run_every=2 if st.session_state.get("poll_enabled") else None)
+def job_panel():
+    job_id = st.session_state.get("active_job")
+    if not job_id:
+        return
+    st.subheader("3. Result")
+    try:
+        job = api.get_job(job_id)
     except Exception as exc:
+        st.warning(f"Unable to refresh job: {exc}. The server may still be processing it.")
+        return
+    st.caption(f"Job {job_id}")
+    job_steps = job.get("sampling_steps", 20)
+    st.caption(f"This result uses {job_steps} sampling steps.")
+    if job_steps != sampling_steps:
+        st.info("Changing quality does not update an existing result. Run the selected area again to generate a new product.")
+    if job["status"] not in ("preparing", "queued", "processing") and st.session_state.get("poll_enabled"):
+        st.session_state.poll_enabled = False
+        st.rerun()
+    if job["status"] in ("preparing", "queued", "processing"):
+        started = st.session_state.setdefault("poll_started", time.monotonic())
+        elapsed = time.monotonic() - started
+        st.progress(job["progress"], text=job["message"])
+        st.caption(f"Waiting {elapsed / 60:.1f} minutes · {job['patches_completed']} of {job['plan']['patches']} patches completed")
+        if elapsed > 3600:
+            st.warning("This job has taken over an hour. Its ID is saved; inspect backend logs or reopen it from job history.")
+            if st.session_state.get("poll_enabled"):
+                st.session_state.poll_enabled = False
+                st.rerun()
+        if not st.session_state.get("poll_enabled") and st.button("Resume status updates"):
+            st.session_state.poll_started = time.monotonic()
+            st.session_state.poll_enabled = True
+            st.rerun()
+        return
+    if job["status"] == "failed":
+        st.error(job.get("error") or "The job failed.")
+        return
+    st.success(f"Completed in {job.get('inference_seconds', 0):.1f} seconds of inference and output processing.")
+    try:
+        cached = st.session_state.get("products")
+        if cached is None or cached["job_id"] != job_id:
+            crop = api.download_result(job_id, "crop")
+            result = api.download_result(job_id)
+            before, after = comparison_images(crop, result)
+            metadata = get_geotiff_metadata(result)
+            mapped = map_preview(result) if metadata["crs"] else None
+            cached = dict(job_id=job_id, crop=crop, result=result, before=before, after=after, metadata=metadata, mapped=mapped)
+            st.session_state.products = cached
+        before_after_slider(cached["before"], cached["after"], before_label="Selected original area", after_label="ESA LDSR-S2 · 4×")
+        with st.expander("Inspect fine detail"):
+            crop_width = cached["metadata"]["width"] // 4
+            crop_height = cached["metadata"]["height"] // 4
+            detail_width, detail_height = min(32, crop_width), min(32, crop_height)
+            x_col, y_col = st.columns(2)
+            x = x_col.number_input("Detail column", min_value=0, max_value=crop_width-detail_width,
+                                   value=(crop_width-detail_width)//2, key=f"detail-x-{job_id}")
+            y = y_col.number_input("Detail row", min_value=0, max_value=crop_height-detail_height,
+                                   value=(crop_height-detail_height)//2, key=f"detail-y-{job_id}")
+            baseline, detail = detail_images(cached["crop"], cached["result"], x, y, detail_width, detail_height)
+            left_detail, right_detail = st.columns(2)
+            left_detail.image(baseline, caption="Original · bicubic enlarged", width=baseline.width)
+            right_detail.image(detail, caption=f"LDSR-S2 · {job_steps} steps", width=detail.width)
+            st.caption("Matching area and contrast. Each SR pixel is displayed at 2× size without smoothing; no sharpening filter is applied.")
+        left, right = st.columns(2)
+        left.download_button("Download SR GeoTIFF", cached["result"], file_name=f"{job_id}_sr.tif", mime="image/tiff")
+        right.download_button("Download original AOI", cached["crop"], file_name=f"{job_id}_crop.tif", mime="image/tiff")
+        if cached["mapped"]:
+            image, bounds = cached["mapped"]
+            show_result_map(bounds, image, job_id)
+            st.caption("Input: 10 m · Output grid: 2.5 m · Geographic extent preserved.")
+        else:
+            st.info("This TIFF has no CRS. The output has 4× more pixels; its ground resolution and location remain unknown.")
+        st.caption("Super-resolution is a learned estimate, not a native 2.5 m observation. Added detail is not proof of increased accuracy.")
+        with st.expander("Product and processing metadata"):
+            st.json(cached["metadata"])
+            st.json(job)
+    except Exception as exc:
+        st.error(f"Could not display the result: {exc}")
 
-        st.error(
-            "❌ Could not display the generated result."
-        )
 
-        st.exception(
-            exc
-        )
-
-
-# ============================================================
-# FOOTER
-# ============================================================
-
-st.divider()
-
-st.caption(
-    "Satellite SRM • Sentinel-2 10 m → 2.5 m • "
-    "ESA LDSR-S2 pretrained model"
-)
+job_panel()

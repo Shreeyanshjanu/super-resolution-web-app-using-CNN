@@ -2,6 +2,7 @@ from pathlib import Path
 
 import torch
 import opensr_model
+from inference.model import load_model
 from omegaconf import OmegaConf
 
 
@@ -52,17 +53,13 @@ def main() -> None:
     # ---------------------------------------------------------
     print("Creating ESAOpenSR model...")
 
-    model = opensr_model.SRLatentDiffusion(
-        config,
-        device=device,
-    )
+    model, device = load_model(device=device, sampling_steps=20)
 
     # ---------------------------------------------------------
     # Download/load pretrained checkpoint
     # ---------------------------------------------------------
     print("Loading pretrained weights...")
 
-    model.load_pretrained(config.ckpt_version)
 
     model.eval()
 

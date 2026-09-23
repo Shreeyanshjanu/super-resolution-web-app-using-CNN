@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+from html import escape
 from io import BytesIO
 
 import streamlit as st
@@ -42,6 +43,7 @@ def before_after_slider(
             "Both before and after images are required."
         )
 
+    before_label, after_label = escape(before_label), escape(after_label)
     before_data = _image_to_base64(before)
     after_data = _image_to_base64(after)
 
@@ -121,12 +123,12 @@ def before_after_slider(
                 top: 0;
                 right: 0;
 
-                width: 50%;
+                width: 100%;
+                clip-path: inset(0 0 0 50%);
                 height: 100%;
 
                 overflow: hidden;
 
-                border-left: 3px solid white;
 
                 z-index: 5;
             }}
@@ -141,7 +143,7 @@ def before_after_slider(
                 top: 0;
                 right: 0;
 
-                width: 100vw;
+                width: 100%;
                 max-width: none;
 
                 height: 100%;
@@ -378,8 +380,8 @@ def before_after_slider(
                 const rightWidth =
                     100 - Number(value);
 
-                afterContainer.style.width =
-                    rightWidth + "%";
+                afterContainer.style.clipPath =
+                    "inset(0 0 0 " + value + "%)";
 
                 slider.style.left =
                     value + "%";
