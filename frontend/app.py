@@ -6,6 +6,7 @@ import streamlit as st
 
 from frontend.api_client import SRMApiClient
 from frontend.components.comparison import before_after_slider
+from frontend.components.evaluation import render_evaluation_dashboard
 from frontend.components.map_view import select_aoi, show_result_map
 from frontend.components.results import comparison_images, detail_images, get_geotiff_metadata, map_preview
 
@@ -65,7 +66,11 @@ order_labels = {"auto": "Read band descriptions", "rgbn": "RGBN — B04, B03, B0
 order = st.selectbox("Input band order", list(order_labels), format_func=order_labels.get)
 scale = st.selectbox("Reflectance storage", [10000, 1],
                      format_func=lambda x: "Reflectance × 10,000" if x == 10000 else "Reflectance in [0, 1]")
-st.caption("For the unlabelled SEN2NAIP demo, choose RGBN. Labelled prepared files can use their band descriptions.")
+st.caption(
+    "Read band descriptions: for labelled Sentinel-2 TIFFs with B02/B03/B04/B08 metadata. "
+    "RGBN: when bands are ordered B04, B03, B02, B08 (e.g. SEN2NAIP demo). "
+    "BGRN: when bands are ordered B02, B03, B04, B08."
+)
 
 fingerprint = None
 if uploaded is not None:
@@ -234,6 +239,18 @@ def job_panel():
         with st.expander("Product and processing metadata"):
             st.json(cached["metadata"])
             st.json(job)
+        if "evaluation" not in cached or cached["evaluation_job_id"] != job_id:
+            with st.spinner("Computing evaluation metrics…"):
+                try:
+                    cached["evaluation"] = api.evaluation(job_id)
+                    cached["evaluation_job_id"] = job_id
+                except Exception as exc:
+                    cached["evaluation"] = None
+                    cached["evaluation_error"] = str(exc)
+        if cached.get("evaluation"):
+            render_evaluation_dashboard(cached["crop"], cached["result"], cached["evaluation"], job, api)
+        elif cached.get("evaluation_error"):
+            st.warning(f"Evaluation unavailable: {cached['evaluation_error']}")
     except Exception as exc:
         st.error(f"Could not display the result: {exc}")
 

@@ -62,7 +62,7 @@ class AOITests(RasterTestCase):
 
     def test_unlabelled_bands_need_explicit_order(self):
         source = make_raster(self.root/"unlabelled.tif",descriptions=None)
-        with self.assertRaisesRegex(ValueError,"Band descriptions"):
+        with self.assertRaisesRegex(ValueError,"band descriptions"):
             inspect_raster(source)
         self.assertEqual(inspect_raster(source,"rgbn")["band_indexes"],[1,2,3,4])
 

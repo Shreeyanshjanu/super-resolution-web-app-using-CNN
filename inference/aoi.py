@@ -58,7 +58,10 @@ def band_indexes(src, order: str = "auto") -> list[int]:
     if order == "auto":
         if len(set(descriptions)) == 4 and set(descriptions) == set(BANDS):
             return [descriptions.index(band) + 1 for band in BANDS]
-        raise ValueError("Band descriptions are missing or ambiguous. Specify RGBN (B04,B03,B02,B08) or BGRN (B02,B03,B04,B08).")
+        raise ValueError(
+            "This TIFF does not contain Sentinel-2 band descriptions (B02, B03, B04, B08). "
+            "Please select RGBN or BGRN manually in the Input band order dropdown."
+        )
     if order not in ("rgbn", "bgrn"):
         raise ValueError("Band order must be auto, rgbn or bgrn.")
     return [1, 2, 3, 4] if order == "rgbn" else [3, 2, 1, 4]

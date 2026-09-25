@@ -5,6 +5,7 @@ from fastapi import FastAPI
 from fastapi.responses import JSONResponse
 from filelock import FileLock, Timeout
 
+from backend.routes.evaluation import router as evaluation_router
 from backend.routes.health import router as health_router
 from backend.routes.super_resolution import router as sr_router
 from backend.services.job_manager import JobManager
@@ -69,6 +70,7 @@ app = FastAPI(title="Satellite SRM API", version="0.2.0",
 app.add_middleware(UploadLimit)
 app.include_router(health_router)
 app.include_router(sr_router)
+app.include_router(evaluation_router)
 
 
 @app.get("/")

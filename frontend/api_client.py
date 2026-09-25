@@ -48,3 +48,9 @@ class SRMApiClient:
 
     def delete_scene(self, scene_id):
         return self._request("DELETE", f"/api/scenes/{scene_id}").json()
+
+    def evaluation(self, job_id):
+        return self._request("GET", f"/api/jobs/{job_id}/evaluation", timeout=60).json()
+
+    def evaluation_report(self, job_id):
+        return self._request("GET", f"/api/jobs/{job_id}/evaluation/report", timeout=60).content
